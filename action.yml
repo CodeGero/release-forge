@@ -1,0 +1,146 @@
+name: 'Release Forge'
+description: 'Smart release automation — auto-detect version bump, generate changelog, create GitHub release.'
+author: 'Kryptorious Quantum Biosciences, Inc.'
+branding:
+  icon: 'tag'
+  color: 'green'
+
+inputs:
+  github-token:
+    description: 'GitHub token for creating releases'
+    required: true
+  version-file:
+    description: 'Path to file containing version (e.g. pyproject.toml, package.json)'
+    required: false
+    default: ''
+  changelog-file:
+    description: 'Path to changelog file'
+    required: false
+    default: 'CHANGELOG.md'
+  draft:
+    description: 'Create as draft release'
+    required: false
+    default: 'false'
+  prerelease:
+    description: 'Mark as prerelease'
+    required: false
+    default: 'false'
+  generate-release-notes:
+    description: 'Auto-generate release notes from commits'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect version bump type
+      id: bump
+      shell: bash
+      run: |
+        COMMITS=$(git log $(git describe --tags --abbrev=0 2>/dev/null || echo HEAD~100)..HEAD --oneline 2>/dev/null || git log -20 --oneline)
+
+        MAJOR=0
+        MINOR=0
+        PATCH=0
+
+        if echo "$COMMITS" | grep -qiE "BREAKING CHANGE|major:"; then
+          MAJOR=1
+        fi
+        if echo "$COMMITS" | grep -qiE "^feat|^feature|minor:"; then
+          MINOR=1
+        fi
+        if echo "$COMMITS" | grep -qiE "^fix|^bug|^patch|^docs|^chore|^refactor|^test|patch:"; then
+          PATCH=1
+        fi
+
+        if [ "$MAJOR" = "1" ]; then
+          BUMP="major"
+        elif [ "$MINOR" = "1" ]; then
+          BUMP="minor"
+        else
+          BUMP="patch"
+        fi
+
+        echo "bump_type=$BUMP" >> $GITHUB_OUTPUT
+        echo "Detected bump: $BUMP"
+
+    - name: Get current version
+      id: version
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.version-file }}" ] && [ -f "${{ inputs.version-file }}" ]; then
+          VERSION=$(grep -Po 'version\s*=\s*"\K[^"]+' "${{ inputs.version-file }}" 2>/dev/null || echo "0.0.0")
+        else
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          VERSION=${LATEST_TAG#v}
+        fi
+        echo "current=$VERSION" >> $GITHUB_OUTPUT
+        echo "Current version: $VERSION"
+
+    - name: Calculate new version
+      id: new_version
+      shell: bash
+      run: |
+        IFS='.' read -r MAJOR MINOR PATCH <<< "${{ steps.version.outputs.current }}"
+        BUMP="${{ steps.bump.outputs.bump_type }}"
+
+        case $BUMP in
+          major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+          minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+          patch) PATCH=$((PATCH + 1)) ;;
+        esac
+
+        NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+        echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "tag=v$NEW_VERSION" >> $GITHUB_OUTPUT
+        echo "New version: $NEW_VERSION"
+
+    - name: Update version file
+      if: inputs.version-file != ''
+      shell: bash
+      run: |
+        FILE="${{ inputs.version-file }}"
+        if [ -f "$FILE" ]; then
+          sed -i "s/version\s*=\s*\"[^\"]*\"/version = \"${{ steps.new_version.outputs.version }}\"/" "$FILE" 2>/dev/null || true
+          sed -i "s/\"version\":\s*\"[^\"]*\"/\"version\": \"${{ steps.new_version.outputs.version }}\"/" "$FILE" 2>/dev/null || true
+        fi
+
+    - name: Update changelog
+      if: inputs.changelog-file != ''
+      shell: bash
+      run: |
+        CHANGELOG="${{ inputs.changelog-file }}"
+        TODAY=$(date +%Y-%m-%d)
+        COMMITS=$(git log $(git describe --tags --abbrev=0 2>/dev/null || echo HEAD~100)..HEAD --pretty=format:"- %s" 2>/dev/null || echo "- Release ${{ steps.new_version.outputs.version }}")
+
+        if [ -f "$CHANGELOG" ]; then
+          sed -i "2i\\\n## [${{ steps.new_version.outputs.version }}] - $TODAY\n\n$COMMITS\n" "$CHANGELOG"
+        else
+          echo -e "# Changelog\n\n## [${{ steps.new_version.outputs.version }}] - $TODAY\n\n$COMMITS\n" > "$CHANGELOG"
+        fi
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ steps.new_version.outputs.version }}
+        name: v${{ steps.new_version.outputs.version }}
+        body: ${{ steps.changelog.outputs.content }}
+        draft: ${{ inputs.draft }}
+        prerelease: ${{ inputs.prerelease }}
+        generate_release_notes: ${{ inputs.generate-release-notes }}
+        token: ${{ inputs.github-token }}
+
+    - name: Summary
+      shell: bash
+      run: |
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  🏷️  Release Forge — v${{ steps.new_version.outputs.version }}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  Bump: ${{ steps.bump.outputs.bump_type }}"
+        echo "  Tag: v${{ steps.new_version.outputs.version }}"
+        echo ""
+        echo "  Premium: Advanced changelog generation,"
+        echo "  Slack/Discord notifications, custom templates"
+        echo "  → https://kryptorious.gumroad.com/l/jbvet"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
